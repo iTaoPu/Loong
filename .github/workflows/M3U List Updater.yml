@@ -1,0 +1,44 @@
+name: M3U List Updater
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天UTC时间00:00（北京时间08:00）运行
+  workflow_dispatch:      # 支持手动触发
+  push:
+    branches:
+      - main             # 主分支push时触发
+
+jobs:
+  update-m3u:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # 允许工作流推送更改
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # 获取完整历史记录
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r scripts/requirements.txt
+        
+    - name: Run M3U processor
+      run: python scripts/process_m3u.py
+      env:
+        SOURCE_URL: "https://tv.iill.top/m3u/Gather"
+        
+    - name: Commit and push changes
+      run: |
+        timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+        git config --local user.email "actions@github.com"
+        git config --local user.name "GitHub Actions"
+        git add generated/*.m3u
+        git diff-index --quiet HEAD || git commit -m "Auto-update M3U lists [$timestamp]"
+        git push
