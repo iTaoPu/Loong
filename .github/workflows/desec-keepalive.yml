@@ -1,0 +1,36 @@
+name: deSEC Domain Keep-Alive
+
+on:
+  schedule:
+    # 每周一上午 8 点（UTC）自动触发
+    - cron: '0 8 * * 1'
+  workflow_dispatch: # 支持在 GitHub 后台手动点击运行测试
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Touch deSEC Keep-Alive Record
+        env:
+          DESEC_TOKEN: ${{ secrets.DESEC_TOKEN }}
+          # 替换为你的完整 dedyn.io 域名
+          DOMAIN: "i.sspai.dedyn.io"
+        run: |
+          # 获取当前时间戳
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          echo "Updating keep-alive record for $DOMAIN at $TIMESTAMP..."
+          
+          # 更新或创建名为 _keepalive 的 TXT 记录
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PUT "https://desec.io/api/v1/domains/${DOMAIN}/rrsets/_keepalive/TXT/" \
+            -H "Authorization: Token ${DESEC_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"subname\": \"_keepalive\", \"type\": \"TXT\", \"records\": [\"\"keepalive-timestamp: ${TIMESTAMP}\"\"], \"ttl\": 3600}")
+          
+          if [ "$RESPONSE" -eq 200 ] || [ "$RESPONSE" -eq 201 ]; then
+            echo "Successfully updated deSEC record. Status code: $RESPONSE"
+          else
+            echo "Failed to update deSEC record. Status code: $RESPONSE"
+            exit 1
+          fi
