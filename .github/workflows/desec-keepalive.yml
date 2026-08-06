@@ -2,7 +2,7 @@ name: deSEC Domain Keep-Alive
 
 on:
   schedule:
-    # 每周一上午 8 点（UTC）自动触发
+    # 每周一上午 8 点（UTC）自动触发运行
     - cron: '0 8 * * 1'
   workflow_dispatch: # 支持在 GitHub 后台手动点击运行测试
 
@@ -13,24 +13,56 @@ jobs:
       - name: Touch deSEC Keep-Alive Record
         env:
           DESEC_TOKEN: ${{ secrets.DESEC_TOKEN }}
-          # 替换为你的完整 dedyn.io 域名
+          # 替换为你的域名（如 cdn.dedyn.io 或 i.cdn.dedyn.io）
           DOMAIN: "i.sspai.dedyn.io"
         run: |
-          # 获取当前时间戳
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
           echo "Updating keep-alive record for $DOMAIN at $TIMESTAMP..."
           
-          # 更新或创建名为 _keepalive 的 TXT 记录
+          # 提取在 deSEC 注册的根 Zone 名称（如 cdn.dedyn.io）
+          ZONE_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if (NF>3) print $(NF-2)"."$(NF-1)"."$NF; else print $0}')
+          
+          # 计算相对子域名 (subname)
+          if [ "$DOMAIN" = "$ZONE_DOMAIN" ]; then
+            SUBNAME="_keepalive"
+          else
+            PREFIX=${DOMAIN%.$ZONE_DOMAIN}
+            SUBNAME="_keepalive.${PREFIX}"
+          fi
+          
+          echo "Target Zone: $ZONE_DOMAIN | Target Subname: $SUBNAME"
+          
+          # 构造标准的 TXT 记录内容（内部双引号转义为 deSEC TXT 规范）
+          RECORD_VAL="\"keepalive-timestamp: ${TIMESTAMP}\""
+          
+          # 1. 优先使用 POST 新建或直接覆写 RRSet
+          POST_BODY=$(jq -n \
+            --arg sub "$SUBNAME" \
+            --arg val "$RECORD_VAL" \
+            '{subname: $sub, type: "TXT", records: [$val], ttl: 3600}')
+            
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X PUT "https://desec.io/api/v1/domains/${DOMAIN}/rrsets/_keepalive/TXT/" \
+            -X POST "https://desec.io/api/v1/domains/${ZONE_DOMAIN}/rrsets/" \
             -H "Authorization: Token ${DESEC_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data "{\"subname\": \"_keepalive\", \"type\": \"TXT\", \"records\": [\"\"keepalive-timestamp: ${TIMESTAMP}\"\"], \"ttl\": 3600}")
+            -d "$POST_BODY")
           
           if [ "$RESPONSE" -eq 200 ] || [ "$RESPONSE" -eq 201 ]; then
-            echo "Successfully updated deSEC record. Status code: $RESPONSE"
+            echo "Successfully updated deSEC record via POST. Status code: $RESPONSE"
           else
-            echo "Failed to update deSEC record. Status code: $RESPONSE"
-            exit 1
+            echo "POST failed with HTTP $RESPONSE. Trying PUT (modify existing)..."
+            
+            # 2. 如果 POST 因记录已存在报错，改用 PUT 对特定子域点对点更新
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X PUT "https://desec.io/api/v1/domains/${ZONE_DOMAIN}/rrsets/${SUBNAME}/TXT/" \
+              -H "Authorization: Token ${DESEC_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$POST_BODY")
+              
+            if [ "$RESPONSE" -eq 200 ] || [ "$RESPONSE" -eq 201 ]; then
+              echo "Successfully updated deSEC record via PUT. Status code: $RESPONSE"
+            else
+              echo "Failed to update deSEC record. Status code: $RESPONSE"
+              exit 1
+            fi
           fi
