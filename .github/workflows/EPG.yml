@@ -1,36 +1,20 @@
-name: Generic Remote File Sync & Update
+name: EPG Update
 
 on:
   workflow_dispatch:
-    inputs:
-      file_url:
-        description: '要下载的远程文件 URL'
-        required: false
-        default: 'https://example.com/data.txt'
-        type: string
-      output_filename:
-        description: '保存到本地的目标文件名'
-        required: false
-        default: 'data.txt'
-        type: string
   push:
     branches: [ main, master ]
   schedule:
-    # 默认每 3 小时自动运行一次
     - cron: '0 */3 * * *'
 
 env:
   TZ: Asia/Shanghai
-  # ===== 可在此处自定义全局默认配置 =====
-  TARGET_URL: "https://example.com/data.txt"  # 远程文件 URL
-  LOCAL_FILE: "data.txt"                     # 保存的文件名
-  ENABLE_GZIP: "true"                        # 是否生成 .gz 压缩包 (true/false)
 
 jobs:
-  sync-and-update:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 赋予写入权限，以便 git push
+      contents: write  # 赋予 GitHub Token 写入权限以支持原生 git push
 
     steps:
     - name: Checkout Repository
@@ -38,70 +22,44 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Download & Process File
-      id: process
+    - name: Update EPG Files
+      id: update
       run: |
-        # 优先读取手动输入的参数，若无则读取环境变量
-        URL="${{ github.event.inputs.file_url || env.TARGET_URL }}"
-        FILENAME="${{ github.event.inputs.output_filename || env.LOCAL_FILE }}"
-        
-        echo "正在下载文件: $URL"
         temp_file=$(mktemp)
-        
-        # 1. 下载文件 (-s 隐式下载，-S 显示错误)
-        if ! curl -sSL -o "$temp_file" "$URL"; then
-          echo "::error::文件下载失败"
-          rm -f "$temp_file"
-          exit 1
-        fi
+        wget -nv -O "$temp_file" https://raw.githubusercontent.com/suzukua/epg/hidden/t.xml
 
-        # 2. 校验文件有效性 (检查大小大于 0)
-        if [ ! -s "$temp_file" ]; then
-          echo "::error::下载的文件为空"
-          rm -f "$temp_file"
-          exit 1
-        fi
+        if [ -s "$temp_file" ] && grep -q '<?xml' "$temp_file"; then
+          sed -i 's|https://github.com/taksssss/iptv-tool|https://i叚娤.倖鍢.net.cn|g' "$temp_file"
+          sed -i 's|Tak|精準導航·盡享觀看|g' "$temp_file"
 
-        # -------------------------------------------------------------
-        # 3. 在此处添加你需要的数据处理/字符串替换逻辑 (可选)
-        # 示例：使用 sed 替换文本
-        # sed -i 's|源文本|目标文本|g' "$temp_file"
-        # -------------------------------------------------------------
-
-        # 4. 比对文件是否发生变更
-        if [ ! -f "$FILENAME" ] || ! cmp -s "$temp_file" "$FILENAME"; then
-          mv "$temp_file" "$FILENAME"
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
-          echo "状态: 检测到内容变更/新文件创建"
+          if ! cmp -s "$temp_file" epg.xml; then
+            mv "$temp_file" epg.xml
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "内容未变化，跳过更新"
+            rm -f "$temp_file"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
         else
-          echo "状态: 内容无变化，跳过更新"
+          echo "::error::下载的文件无效或为空"
           rm -f "$temp_file"
-          echo "changed=false" >> "$GITHUB_OUTPUT"
+          exit 1
         fi
 
-    - name: Generate Gzip Archive
-      if: steps.process.outputs.changed == 'true' && env.ENABLE_GZIP == 'true'
+    - name: Generate gz archive
+      if: steps.update.outputs.changed == 'true'
       run: |
-        FILENAME="${{ steps.process.outputs.filename }}"
-        echo "开始压缩文件: $FILENAME"
-        gzip -c -f "$FILENAME" > "${FILENAME}.gz"
-        ls -lh "${FILENAME}.gz"
+        echo "开始生成 epg.xml.gz"
+        gzip -c epg.xml > epg.xml.gz
+        ls -lh epg.xml.gz
+        echo "生成完成"
 
-    - name: Commit & Push Changes
-      if: steps.process.outputs.changed == 'true'
+    - name: Commit and Push changes
+      if: steps.update.outputs.changed == 'true'
       run: |
-        FILENAME="${{ steps.process.outputs.filename }}"
-        
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        
-        # 添加修改的文件（包含可能生成的 .gz 包）
-        git add "$FILENAME"
-        if [ -f "${FILENAME}.gz" ]; then
-          git add "${FILENAME}.gz"
-        fi
-        
+        git add epg.xml epg.xml.gz
         git status
-        git commit -m "Auto Update: $FILENAME [$(date +'%Y-%m-%d %H:%M:%S')]"
+        git commit -m "EPG更新: $(date +'%Y-%m-%d %H:%M:%S')"
         git push
