@@ -1,0 +1,141 @@
+name: KuTV Daily Update
+
+on:
+  workflow_dispatch:
+  watch:
+    types: [started]
+  schedule:
+    - cron: '30 */1 * * *'
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  Update:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: GetTime
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d %H:%M:%S CST')" >> $GITHUB_OUTPUT
+
+    - name: Update Files
+      run: |
+        # 设置字符编码，避免中文乱码
+        export LC_ALL=C.UTF-8
+
+        # 下载基础源文件并清理换行符（保留所有行，不做去重）
+        wget -q https://iptv.445569.xyz/live.m3u -O Base1.m3u
+        tr -d '\r' < Base1.m3u > Base_clean.m3u
+
+        # 将基础源中的 tvg-logo 域名从 epg.112114.xyz/logo/ 替换为新域名
+        sed -i 's|https://epg.112114.xyz/logo/|https://logo.ifanr.dedyn.io/tv/|g' Base_clean.m3u
+
+        # 生成央视源（过滤包含“央视”且不包含TG频道的条目，保留原始顺序，不去重）
+        tail -n +2 Base_clean.m3u | awk '
+          /^#EXTINF:/ { inf=$0; getline url; if (inf ~ /央视/ && inf !~ /TG频道/) print inf "\n" url }
+        ' > CCTV.m3u
+
+        # 生成非央视源（过滤不包含“央视”且不包含TG频道的条目，保留原始顺序，不去重）
+        tail -n +2 Base_clean.m3u | awk '
+          /^#EXTINF:/ { inf=$0; getline url; if (inf !~ /央视/ && inf !~ /TG频道/) print inf "\n" url }
+        ' > CNTV.m3u
+
+        # 生成最终M3U：写入自定义头部
+        echo '#EXTM3U x-tvg-url="https://itv.sspai.net.cn/epg.xml.gz" catchup="append" catchup-source="?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"' > KuTV.m3u
+
+        # 添加自定义提示（与之前一致）
+        echo '#EXTINF:-1 tvg-id="温馨提示" tvg-name="温馨提示" tvg-logo="https://logo.ifanr.dedyn.io/tv/温馨提示.png" group-title="🦧温馨提示",温馨提示' >> KuTV.m3u
+        echo 'https://icloud.ifanr.pp.ua/温馨提示.mp4' >> KuTV.m3u
+
+        echo '#EXTINF:-1 tvg-id="谨防诈骗" tvg-name="谨防诈骗" tvg-logo="https://logo.ifanr.dedyn.io/tv/谨防诈骗.png" group-title="🦧温馨提示",谨防诈骗' >> KuTV.m3u
+        echo 'https://icloud.ifanr.pp.ua/温馨提示.mp4' >> KuTV.m3u
+
+        echo '#EXTINF:-1 tvg-id="禁止蕉绿" tvg-name="禁止蕉绿" tvg-logo="https://logo.ifanr.dedyn.io/tv/禁止蕉绿.png" group-title="🦧温馨提示",禁止蕉绿' >> KuTV.m3u
+        echo 'https://icloud.ifanr.pp.ua/温馨提示.mp4' >> KuTV.m3u
+
+        echo '#EXTINF:-1 tvg-id="Cloudflare TV" tvg-name="Cloudflare TV" tvg-logo="https://logo.ifanr.dedyn.io/tv/CloudflareTV.png" group-title="🦧温馨提示",Cloudflare TV' >> KuTV.m3u
+        echo 'https://cloudflare.tv/hls/live.m3u8' >> KuTV.m3u
+
+        # 合并央视和非央视源（保持先央视后非央视的顺序）
+        cat CCTV.m3u CNTV.m3u >> KuTV.m3u
+
+        # 生成按 M3U 分组顺序的 TXT 播放列表（组内频道按名称排序，去重）
+        awk '
+          BEGIN { OFS=","; order_idx=0 }
+          /^#EXTINF:/ {
+              # 提取 group-title（如果有）
+              gtitle = "";
+              if (match($0, /group-title="([^"]+)"/)) {
+                  gtitle = substr($0, RSTART+13, RLENGTH-14);
+              }
+              # 提取频道名（最后一个逗号后面）
+              last_comma = index($0, ",")
+              while (index(substr($0, last_comma+1), ",") > 0) {
+                  last_comma = last_comma + index(substr($0, last_comma+1), ",")
+              }
+              name = substr($0, last_comma+1)
+              gsub(/^[ \t]+|[ \t]+$/, "", name)
+              getline url
+              gsub(/\r/, "", url)
+              if (name != "" && url != "") {
+                  if (gtitle == "") gtitle = "其他"
+                  # 记录分组首次出现的顺序
+                  if (!(gtitle in groups)) {
+                      groups[gtitle] = 1
+                      order[++order_idx] = gtitle
+                  }
+                  # 去重 key
+                  key = gtitle "\x1F" name "\x1F" url
+                  if (!seen[key]) {
+                      seen[key] = 1
+                      data[gtitle][name] = url
+                  }
+              }
+          }
+          END {
+              # 按照 M3U 中出现的顺序输出分组
+              for (i = 1; i <= order_idx; i++) {
+                  g = order[i]
+                  print "# " g > "KuTV.txt"
+                  # 组内频道按名称排序
+                  m = asorti(data[g], sorted_names)
+                  for (j = 1; j <= m; j++) {
+                      name = sorted_names[j]
+                      print name "," data[g][name] >> "KuTV.txt"
+                  }
+                  print "" >> "KuTV.txt"
+              }
+          }
+        ' KuTV.m3u
+
+        # 清理临时文件
+        rm -f Base1.m3u Base_clean.m3u CCTV.m3u CNTV.m3u
+
+        # 更新README
+        echo -e "# IPTV 自动更新\n\n### 更新于 ${{ steps.date.outputs.date }}\n\n### 包含格式:\n- [M3U播放列表](KuTV.m3u)（KuTV.M3U）\n- [TXT播放列表](KuTV.txt)（KuTV.M3U）" > README.md
+
+    - name: Commit Changes
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+
+        git pull --rebase --autostash origin main || git rebase --abort
+
+        git add KuTV.m3u KuTV.txt README.md
+
+        if git diff --cached --quiet; then
+          echo "没有文件变更，跳过提交"
+          exit 0
+        fi
+
+        git commit -m "IPTV更新: ${{ steps.date.outputs.date }}"
+
+    - name: Push Update
+      continue-on-error: true
+      run: |
+        git push origin HEAD:main || git push --set-upstream origin main
